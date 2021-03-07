@@ -1,149 +1,243 @@
 use std::{
-  fmt::Display,
-  ops::{Add, AddAssign, Sub},
+  convert::TryInto,
+  ops::{Add, Sub},
 };
 
-#[derive(Debug, Clone)]
-pub struct BigUint {
+#[derive(Clone, Debug)]
+struct BigUint {
   data: Vec<u8>,
 }
 
-fn num_to_vec(mut n: u128) -> Vec<u8> {
-  let mut res = Vec::new();
+impl BigUint {
+  pub fn new() -> Self {
+    Self {
+      data: Vec::with_capacity(16),
+    }
+  }
 
-  let mut combine = false;
+  pub fn from<T: TryInto<u128> + Copy>(init: T) -> Self {
+    let mut s = BigUint::new();
 
-  while n > 0 {
-    let mut nibble = ((n % 10) as u8) << 4;
+    let mut value = as_u128(init);
 
-    if combine {
-      if let Some(prev) = res.pop() {
-        nibble = prev | (nibble >> 4);
+    loop {
+      s.data.push((value & 255) as u8);
+      value >>= 8;
+
+      if value == 0 {
+        break;
       }
     }
-    combine = !combine;
 
-    res.push(nibble);
-
-    n /= 10;
+    s
   }
 
-  res
+  fn get_lower(&self) -> u128 {
+    let mut bytes = self.data.iter().enumerate();
+
+    let mut long = 0;
+    let mut shift_count = 0;
+
+    while let Some((i, byte)) = bytes.next() {
+      long = long | ((byte & 255) as u128) << i * 8;
+      shift_count += 1;
+
+      if shift_count == 16 {
+        return long;
+      }
+    }
+
+    long
+  }
+
+  fn as_u128_vec(&self) -> Vec<u128> {
+    let mut res = Vec::with_capacity(self.data.len() / 8);
+
+    let mut bytes = self.data.iter().enumerate();
+
+    let mut long = 0;
+
+    let mut shift_count = 0;
+
+    while let Some((i, byte)) = bytes.next() {
+      long = long | ((byte & 255) as u128) << i * 8;
+      shift_count += 1;
+
+      if shift_count == 16 {
+        res.push(long);
+        long = 0;
+        shift_count = 0;
+      }
+    }
+
+    res
+  }
 }
 
-impl BigUint {
-  pub fn new(init: u128) -> Self {
-    BigUint {
-      data: num_to_vec(init),
+#[inline(always)]
+fn as_u128<T: TryInto<u128> + Copy>(v: T) -> u128 {
+  match (v).try_into() {
+    Ok(v) => v,
+    _ => 0,
+  }
+}
+
+impl Add<BigUint> for BigUint {
+  type Output = BigUint;
+
+  fn add(self, rhs: BigUint) -> Self::Output {
+    let (mut longest, mut shortest) = if self.data.len() >= rhs.data.len() {
+      (self.data, rhs.data)
+    } else {
+      (rhs.data, self.data)
+    };
+
+    let mut carry = 0;
+
+    let mut byte_idx = 0_usize;
+
+    while let Some(byte) = shortest.get_mut(byte_idx) {
+      let a = *byte as u16;
+      let b = *longest.get_mut(byte_idx).unwrap() as u16;
+
+      let res = a + b + carry as u16;
+
+      *byte = (res & 255) as u8;
+      carry = (res > 255) as u8;
+
+      byte_idx += 1;
+    }
+
+    while let Some(byte) = longest.get(byte_idx) {
+      let res = *byte as u16 + carry as u16;
+
+      let byte = (res & 255) as u8;
+      carry = (res > 255) as u8;
+
+      byte_idx += 1;
+      shortest.push(byte);
+    }
+
+    if carry != 0 {
+      shortest.push(1);
+    }
+
+    BigUint { data: shortest }
+  }
+}
+
+impl<T: TryInto<u128> + Copy> Add<T> for BigUint {
+  type Output = BigUint;
+
+  fn add(mut self, rhs: T) -> Self::Output {
+    let mut rhs = as_u128(rhs);
+
+    let mut carry = 0;
+
+    let mut byte_idx = 0_usize;
+
+    while let Some(byte) = self.data.get_mut(byte_idx) {
+      let a = *byte as u16;
+      let b = (rhs & 255) as u16;
+
+      let res = a + b + carry as u16;
+
+      *byte = (res & 255) as u8;
+      carry = (res > 255) as u8;
+
+      rhs >>= 8;
+
+      byte_idx += 1;
+    }
+
+    rhs += carry as u128;
+
+    while rhs > 0 {
+      let byte = (rhs & 255) as u8;
+      self.data.push(byte);
+      rhs >>= 8;
+    }
+
+    self
+  }
+}
+
+impl<T: TryInto<u128> + Copy> Sub<T> for BigUint {
+  type Output = BigUint;
+
+  fn sub(mut self, rhs: T) -> Self::Output {
+    let mut rhs = as_u128(rhs);
+
+    if self <= rhs {
+      return BigUint::from(0);
+    }
+
+    let mut ptr = self.data.as_mut_ptr();
+
+    unsafe {
+      for _ in 0..self.data.len() {
+        let byte = ptr;
+
+        let a = *byte as u16;
+        let b = (rhs & 255) as u16;
+
+        let res = if b <= a {
+          a - b
+        } else {
+          // we need to borrow
+
+          let mut next_byte = ptr.offset(1);
+
+          loop {
+            if *next_byte > 0 {
+              *next_byte -= 1;
+              break;
+            } else {
+              *next_byte = 255;
+              next_byte = next_byte.offset(1);
+            }
+          }
+
+          (a + 256) - b
+        };
+
+        *byte = (res & 255) as u8;
+
+        rhs >>= 8;
+        ptr = ptr.offset(1);
+      }
+    }
+
+    // while rhs > 0 {
+    //   let byte = (rhs & 255) as u8;
+    //   self.data.push(byte);
+    // }
+
+    self
+  }
+}
+
+impl<T: TryInto<u128> + Copy> PartialOrd<T> for BigUint {
+  fn partial_cmp(&self, other: &T) -> Option<std::cmp::Ordering> {
+    let other = as_u128(*other);
+
+    match self.get_lower().partial_cmp(&other) {
+      Some(a) => {
+        match a {
+          std::cmp::Ordering::Less => {
+            // lower is less than num, so we need to check the u128 vec
+            match self.as_u128_vec().get(1) {
+              Some(next_group) => next_group.partial_cmp(&other),
+              None => Some(a),
+            }
+          }
+          _ => Some(a),
+        }
+      }
+      None => None,
     }
   }
 }
-
-fn vec_add(left: &Vec<u8>, right: &Vec<u8>) -> Vec<u8> {
-  let mut result = Vec::new();
-
-  let (mut l, mut s) = if left.len() >= right.len() {
-    (left.iter(), right.iter())
-  } else {
-    (right.iter(), left.iter())
-  };
-
-  let mut carry: u8 = 0;
-
-  while let Some(b) = s.next() {
-    let a = l.next().unwrap();
-
-    let high_res = (a >> 4) as u16 + (b >> 4) as u16 + carry as u16;
-
-    let high_sum = (high_res % 10) as u8;
-    let high_carry = (high_res > 9) as u8;
-
-    let low_res = (a & 0b1111) as u16 + (b & 0b1111) as u16 + high_carry as u16;
-    let low_sum = (low_res % 10) as u8;
-    carry = (low_res > 9) as u8;
-
-    let sum = (high_sum << 4) + (low_sum);
-
-    result.push(sum);
-  }
-
-  result
-}
-
-// fn vec_sub(left: &Vec<u8>, right: &Vec<u8>) -> Vec<u8> {
-//   let mut result = Vec::new();
-
-//   let (mut l, mut s) = if left.len() >= right.len() {
-//     (left.iter().peekable(), right.iter().peekable())
-//   } else {
-//     (right.iter().peekable(), left.iter().peekable())
-//   };
-
-//   while let Some(b) = s.next() {
-//     let a = l.next().unwrap();
-
-//     let high_res = (a >> 4) as u16 + (b >> 4) as u16 + carry as u16;
-
-//     let high_sum = (high_res % 10) as u8;
-//     let high_carry = (high_res > 9) as u8;
-
-//     let low_res = (a & 0b1111) as u16 + (b & 0b1111) as u16 + high_carry as u16;
-//     let low_sum = (low_res % 10) as u8;
-//     carry = (low_res > 9) as u8;
-
-//     let sum = (high_sum << 4) + (low_sum);
-
-//     result.push(sum);
-//   }
-
-//   result
-// }
-
-impl Add for BigUint {
-  type Output = Self;
-
-  fn add(self, other: Self) -> Self::Output {
-    let result = vec_add(&self.data, &other.data);
-
-    Self { data: result }
-  }
-}
-
-impl Sub for BigUint {
-  type Output = Self;
-
-  fn sub(self, rhs: Self) -> Self::Output {
-    todo!()
-  }
-}
-
-impl AddAssign for BigUint {
-  fn add_assign(&mut self, other: Self) {
-    let result = vec_add(&self.data, &other.data);
-
-    *self = Self { data: result }
-  }
-}
-
-// impl Mul for BigUint {
-//   type Output = Self;
-
-//   fn mul(self, other: Self) -> Self::Output {
-//     // bad approach
-
-//     let mut res = Vec::new();
-
-//     let mut multiplier = other.clone();
-
-//     while multiplier > 0 {
-//       // do something
-//       println!("{}", multiplier);
-//       multiplier -= 1;
-//     }
-
-//     BigUint { data: res }
-//   }
-// }
 
 impl PartialEq for BigUint {
   fn eq(&self, other: &Self) -> bool {
@@ -151,168 +245,143 @@ impl PartialEq for BigUint {
   }
 }
 
-impl PartialEq<u128> for BigUint {
-  fn eq(&self, other: &u128) -> bool {
-    self.data.eq(&num_to_vec(*other))
-  }
-}
+impl<T: TryInto<u128> + Copy> PartialEq<T> for BigUint {
+  fn eq(&self, rhs: &T) -> bool {
+    let rhs = as_u128(*rhs);
 
-impl PartialOrd<u128> for BigUint {
-  fn partial_cmp(&self, other: &u128) -> Option<std::cmp::Ordering> {
-    self.data.partial_cmp(&num_to_vec(*other))
-  }
-}
+    let mut high: u128 = 0;
+    let mut low: u128 = 0;
 
-impl Display for BigUint {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    let mut digits = self.data.iter().rev();
+    let mut data = self.data.iter().enumerate();
 
-    let mut res = String::from("");
-
-    let mut skip_leading_zero = true;
-
-    while let Some(dig) = digits.next() {
-      let low = dig & 0b1111;
-
-      if skip_leading_zero && low == 0 {
-        res = format!("{}{}", res, dig >> 4);
-      } else {
-        res = format!("{}{}{}", res, low, dig >> 4);
-      }
-
-      skip_leading_zero = false;
+    while let Some((i, byte)) = data.next() {
+      low = low | ((byte & 255) as u128) << (i * 8);
     }
 
-    write!(f, "{}", res)
+    while let Some((i, byte)) = data.next() {
+      high = high | ((byte & 255) as u128) << (i * 8);
+    }
+
+    high == 0 && low == rhs
   }
 }
 
 #[cfg(test)]
 mod tests {
 
+  use rand::Rng;
+
   use super::*;
 
   #[test]
-  fn num_to_vec_works_8bit() {
-    let num = 8;
-    let manual_vec = vec![128];
-    let nvec = num_to_vec(num);
-    assert_eq!(manual_vec, nvec);
-  }
-
-  fn vec_to_num(v: &mut Vec<u8>) -> usize {
-    let mut n: usize = 0;
-    let mut len = v.len() * 2;
-    let mut push = true;
-
-    while len > 0 {
-      if let Some(val) = v.pop() {
-        let dig = val & 0b1111;
-        let next_dig = val >> 4;
-
-        if push {
-          v.push(next_dig);
-        }
-        push = !push;
-
-        n += dig as usize;
-        if v.last().is_some() {
-          n *= 10;
-        }
-      }
-      len -= 1;
-    }
-
-    n
+  fn u256_can_be_created() {
+    let _ = BigUint::new();
   }
 
   #[test]
-  fn num_to_vec_works_16bit() {
-    assert_eq!(vec![137, 32], num_to_vec(298));
-    assert_eq!(vec![36, 48], num_to_vec(342));
-    assert_eq!(vec![4, 96], num_to_vec(640));
+  fn creation_is_accurate() {
+    let mut lim = 500_000;
 
-    assert_eq!(298, vec_to_num(&mut num_to_vec(298)));
-    assert_eq!(13276, vec_to_num(&mut num_to_vec(13276)));
-    assert_eq!(9_374_892, vec_to_num(&mut num_to_vec(9_374_892)));
-  }
+    let mut rng = rand::thread_rng();
 
-  #[test]
-  fn big_uint_init() {
-    let _ = BigUint::new(255);
-  }
-
-  #[test]
-  fn big_uint_massive() {
-    let a = BigUint::new(u128::MAX);
-    let a2 = a.clone() + a.clone();
-
-    println!("---------------------------------------------------------");
-    println!("u128::MAX =                     {}", u128::MAX);
-    println!("BigUint::new(usize::MAX) =      {}", a);
-    println!("BigUint::new(usize::MAX) x 2 =  {}", a2);
-    println!("---------------------------------------------------------");
-  }
-
-  #[test]
-  fn big_uint_add_basic() {
-    let big_a = BigUint::new(298);
-    let big_b = BigUint::new(342);
-
-    let sum = big_a + big_b;
-
-    assert_eq!(sum, BigUint::new(640));
-  }
-
-  #[test]
-  fn big_uint_add() {
-    let e = 2_u128.pow(16);
-    let s = e - 500;
-
-    for a in s..=e {
-      for b in s..=e {
-        let big_a = BigUint::new(a);
-        let big_b = BigUint::new(b);
-
-        let sum = big_a + big_b;
-
-        if sum != BigUint::new(a + b) {
-          println!("{:16b} + {:16b} = {:16b}", a, b, a + b);
-          println!(
-            "{:?} + {:?} = {:?}",
-            num_to_vec(a),
-            num_to_vec(b),
-            num_to_vec(a + b)
-          );
-        }
-
-        assert_eq!(sum, BigUint::new(a + b));
-      }
+    while lim > 0 {
+      let r = rng.gen_range(1_u128..=u128::MAX);
+      assert_eq!(BigUint::from(r), r);
+      lim -= 1;
     }
   }
 
   #[test]
-  fn big_uint_sub_basic() {
-    let big_a = BigUint::new(298);
-    let big_b = BigUint::new(342);
+  fn u256_equals_u128() {
+    let big_num = BigUint::from(u128::MAX);
 
-    let diff = big_b - big_a;
-
-    assert_eq!(diff, BigUint::new(44));
+    assert_eq!(big_num, u128::MAX);
   }
-  // #[test]
-  // fn big_uint_add_large() {
-  //   let mut big = BigUint::new(1);
-  //   let one = BigUint::new(1);
 
-  //   println!("{}", big);
+  #[test]
+  fn as_u128_vec_works() {
+    assert_eq!(BigUint::from(u128::MAX).as_u128_vec(), vec![u128::MAX]);
+    assert_eq!(
+      BigUint::from(u128::MAX / 2).as_u128_vec(),
+      vec![u128::MAX / 2]
+    );
+  }
 
-  //   loop {
-  //     big += one.clone();
+  #[test]
+  fn add_works() {
+    let mut big_num = BigUint::from(0);
 
-  //     println!("{}", big);
+    big_num = big_num + 1;
 
-  //     sleep(Duration::from_millis(100))
-  //   }
-  // }
+    assert_eq!(big_num, 1);
+  }
+
+  #[test]
+  fn add_works_range() {
+    let mut big_num = BigUint::from(0);
+    let mut val: u128 = 0;
+
+    for _ in 0..500_000 {
+      val += 1;
+      big_num = big_num + 1;
+
+      assert_eq!(big_num, val);
+    }
+  }
+
+  #[test]
+  fn add_works_fuzz() {
+    assert_eq!(BigUint::from(255), 255);
+    assert_eq!(BigUint::from(256), 256);
+    assert_eq!(BigUint::from(0) + 256, 256);
+    assert_eq!(BigUint::from(255) + 1, BigUint::from(256));
+
+    let mut rng = rand::thread_rng();
+
+    for _ in 0..500_000 {
+      let a = rng.gen_range(1..=2_u64.pow(63));
+      let b = rng.gen_range(1..=2_u64.pow(63));
+
+      assert_eq!(BigUint::from(a + b), a + b);
+      assert_eq!(BigUint::from(a) + BigUint::from(b), BigUint::from(a + b));
+    }
+  }
+
+  #[test]
+  fn sub_works() {
+    assert_eq!(BigUint::from(10) - 10, 0);
+    assert_eq!(BigUint::from(10) - 11, 0);
+    assert_eq!(BigUint::from(10) - 1, 9);
+  }
+
+  #[test]
+  fn sub_works_range() {
+    let mut big_num = BigUint::from(u128::MAX);
+    let mut val = u128::MAX;
+
+    for i in 0..500_000 {
+      val -= 1;
+      big_num = big_num - 1;
+
+      assert_eq!(big_num, val);
+    }
+  }
+
+  #[test]
+  fn sub_works_fuzz() {
+    assert_eq!(BigUint::from(0) - 256, 0);
+    assert_eq!(BigUint::from(255) - 1, 254);
+    assert_eq!(BigUint::from(130_000) - 1, 129_999);
+    assert_eq!(BigUint::from(130_000) - 1, BigUint::from(129_999));
+
+    let mut rng = rand::thread_rng();
+
+    for _ in 0..500_000 {
+      let a = rng.gen_range(2_u64.pow(32)..=2_u64.pow(63));
+      let b = rng.gen_range(1..=2_u64.pow(31));
+
+      assert_eq!(BigUint::from(a - b), a - b);
+      // assert_eq!(BigUint::from(a) - BigUint::from(b), BigUint::from(a - b));
+    }
+  }
 }
