@@ -5,7 +5,7 @@ use std::{
 };
 
 #[derive(Clone, Debug)]
-struct BigUint {
+pub struct BigUint {
   data: Vec<u8>,
 }
 
