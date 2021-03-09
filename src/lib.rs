@@ -33,7 +33,7 @@ impl BigUint {
     s
   }
 
-  fn divmod(&self, d: u128) -> (BigUint, u128) {
+  pub fn divmod(&self, d: u128) -> (BigUint, u128) {
     let n: u128 = self.data.len() as u128 * 8;
 
     let mut q = BigUint::from(0);
